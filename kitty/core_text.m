@@ -18,7 +18,7 @@ typedef struct {
     PyObject_HEAD
 
     unsigned int units_per_em;
-    float ascent, descent, leading, underline_position, underline_thickness, point_sz, scaled_point_sz;
+    float ascent, descent, leading, underline_position, underline_thickness, point_sz, scaled_point_sz, char_width, char_height, cap_height;
     CTFontRef font;
     PyObject *family_name, *full_name, *postscript_name;
 } Face;
@@ -60,12 +60,16 @@ new(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwds) {
                 self->ascent = CTFontGetAscent(self->font);
                 self->descent = CTFontGetDescent(self->font);
                 self->leading = CTFontGetLeading(self->font);
+                self->cap_height = CTFontGetCapHeight(self->font);
                 self->underline_position = CTFontGetUnderlinePosition(self->font);
                 self->underline_thickness = CTFontGetUnderlineThickness(self->font);
                 self->scaled_point_sz = CTFontGetSize(self->font);
                 self->family_name = convert_cfstring(CTFontCopyFamilyName(self->font));
                 self->full_name = convert_cfstring(CTFontCopyFullName(self->font));
                 self->postscript_name = convert_cfstring(CTFontCopyPostScriptName(self->font));
+                CGRect rect = CTFontGetBoundingBox(self->font);
+                self->char_width = self->leading + (rect.size.width / 2);
+                self->char_height = self->ascent + self->descent;
                 if (self->family_name == NULL || self->full_name == NULL || self->postscript_name == NULL) { Py_CLEAR(self); }
             }
         } else {
@@ -120,26 +124,7 @@ font_units_to_pixels(Face *self, PyObject *args) {
 static PyObject*
 cell_size(Face *self) {
 #define cell_size_doc "Return the best cell size for this font based on the advances for the ASCII chars from 32 to 127"
-#define count (128 - 32)
-    unichar chars[count+1] = {0};
-    CGGlyph glyphs[count+1] = {0};
-    for (int i = 0; i < count; i++) chars[i] = 32 + i;
-    CTFontGetGlyphsForCharacters(self->font, chars, glyphs, count);
-    CGSize advances[1] = {0};
-    unsigned int width = 0, w;
-    for (int i = 0; i < count; i++) {
-        if (glyphs[i]) {
-            CTFontGetAdvancesForGlyphs(self->font, kCTFontOrientationHorizontal, glyphs+1, advances, 1);
-            w = (unsigned int)(ceilf(advances[0].width));
-            if (w > width) width = w; 
-        }
-    }
-    // See https://stackoverflow.com/questions/5511830/how-does-line-spacing-work-in-core-text-and-why-is-it-different-from-nslayoutm
-    CGFloat leading = MAX(0, self->leading);
-    leading = floor(leading + 0.5);
-    CGFloat line_height = floor(self->ascent + 0.5) + floor(self->descent + 0.5) + leading;
-    CGFloat ascender_delta = (leading > 0) ? 0 : floor(0.2 * line_height + 0.5);
-    return Py_BuildValue("II", width, (unsigned int)(line_height + ascender_delta));  
+    return Py_BuildValue("II", (int)ceil(self->char_width), (int)ceil(self->char_height - 1));
 #undef count
 }
 
@@ -177,10 +162,13 @@ render_char(Face *self, PyObject *args) {
         // TODO: Scale the glyph if its bbox is larger than the image by using a non-identity transform
         /* CGRect rect = CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, glyphs, 0, 1); */
         CGContextSetTextMatrix(ctx, transform);
-        CGFloat leading = self->leading > 0 ? self->leading : 1;  // Ensure at least one pixel of leading so that antialiasing works at the left edge
-        CGFloat pos_x = leading, pos_y = height - self->ascent;  
-        CGContextSetTextPosition(ctx, pos_x, pos_y);
+        CGContextSetTextPosition(ctx, self->leading, self->descent);
         CTFontDrawGlyphs(font, &glyph, &CGPointZero, 1, ctx);
+
+        // TODO: Move this to behind a setting, it renders the text a bit fatter which I really like.
+        CGContextTranslateCTM(ctx, 1, 0);
+        CTFontDrawGlyphs(font, &glyph, &CGPointZero, 1, ctx);
+        CGContextTranslateCTM(ctx, -1, 0);
     }
 
 end:
